@@ -177,7 +177,14 @@ WoE encoding converts all features onto a common log-odds scale, enforces monoto
 
 Elastic Net regularisation combines L1 (Lasso) and L2 (Ridge) penalties:
 
-$$\min_{\beta} \left\{ \sum_{i=1}^{n}(y_i - \hat{y}_i)^2 + \lambda_1 \sum_{j=1}^{p}|\beta_j| + \lambda_2 \sum_{j=1}^{p}\beta_j^2 \right\}$$
+$$
+\min_{\beta}
+(
+\sum_{i=1}^{n}(y_i-\hat{y}_i)^2
++\lambda_1\sum_{j=1}^{p}|\beta_j|
++\lambda_2\sum_{j=1}^{p}\beta_j^2
+)
+$$
 
 - **L1** shrinks some coefficients to exactly zero (feature selection)
 - **L2** stabilises correlated predictors (prevents blow-up)

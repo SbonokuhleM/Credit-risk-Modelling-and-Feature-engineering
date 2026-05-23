@@ -1,0 +1,1052 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+  - '\usepackage{hyperref}'
+  - '\usepackage{booktabs}'
+---
+
+\begin{titlepage}
+\centering
+\vspace{5cm}
+\begin{center}
+\includegraphics[width=0.2\textwidth]{UCTLogo.jpg} 
+\quad
+\quad
+\includegraphics[width=0.2\textwidth]{fnb.png}
+\end{center}
+{\Huge \bfseries FNB\par}
+\vspace{1cm}
+{\huge Data Quest Project\par}
+{\Large Building Interpretable Credit Models\par}
+\vspace{1cm}
+{\Large Student Details: \par}
+{\normalsize Sbonokuhle Myeni MYNSBO001\par}
+{\normalsize \href{mailto:mynsbo001@myuct.ac.za}{mynsbo001@myuct.ac.za}\par}
+\vspace{0.5cm}
+
+\begin{center}
+\includegraphics[width=15cm]{credit.jpg}
+\end{center}
+
+\end{titlepage}
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(tidyverse)
+library(scorecard)
+library(pROC)
+library(shiny)
+library(plotly)
+library(DT)
+library(kableExtra)
+library(scales)
+library(ggridges)
+library(corrplot)
+library(gridExtra)
+library(glmnet)
+library(caret)
+options(scipen = 999)
+options(kableExtra.latex.load_packages = FALSE)
+```
+
+# Introduction
+
+Credit risk modelling plays a critical role in the financial industry by assisting lending institutions in evaluating the likelihood that a borrower will default on a loan. Accurate credit risk models help financial institutions minimise financial losses, improve lending decisions, and maintain regulatory compliance while ensuring fair access to credit. In modern banking environments, there is increasing emphasis not only on predictive accuracy but also on model interpretability, particularly in highly regulated industries where lending decisions must be transparent and explainable. As a result, interpretable models such as logistic regression remain widely used in credit scoring despite the growing popularity of more complex machine learning algorithms.
+
+The aim of this project was to develop an interpretable credit default prediction model using a simulated loan application dataset provided as part of the FNB Data Quest project. The study explored the trade-off between model interpretability and predictive performance by focusing on logistic regression enhanced through feature engineering, Weight of Evidence (WoE) transformation, Information Value (IV) feature selection, and Elastic Net regularisation. In addition to model development, extensive exploratory data analysis (EDA) and data preprocessing techniques were performed to better understand borrower behaviour, identify important predictors of default risk, and improve data quality.
+
+The dataset initially consisted of over 120,000 observations and included demographic, financial, behavioural, and credit-related variables such as income, debt-to-income ratio, credit utilisation, delinquencies, loan amount, and employment history. The project involved handling missing values, removing duplicates and outliers, standardising inconsistent categorical values, and engineering new risk-based features to improve predictive capability. Special attention was given to variables with potential regulatory concerns, including age, region, and digital-access proxies, in line with responsible lending practices.
+
+Several performance metrics were used to evaluate the effectiveness of the model, including Accuracy, AUC, Gini coefficient, Precision, Recall, F1-score, and Balanced Accuracy. The final model aimed to achieve a balance between predictive performance, interpretability, and regulatory suitability for real-world credit risk applications.
+
+\newpage
+# Part 1: Research
+
+## Generalised Linear Models vs Non-Linear Models for Classification
+
+### Generalised Linear Models (GLMs)
+
+A Generalised Linear Model extends ordinary linear regression to response
+variables with non-normal distributions. For binary classification (like default
+prediction) the **Logistic Regression** model is:
+
+$$
+\log \frac{P(Y = 1 \mid \mathbf{x})}{1 - P(Y = 1 \mid \mathbf{x})} = \eta = \beta_0 + \beta_1 x_1 + \cdots + \beta_p x_p
+$$
+
+The left-hand side is the **log-odds** (logit), and the predicted probability is
+recovered via the sigmoid function:
+
+$$
+P(Y = 1) = \frac{1}{1 + e^{-\eta}}
+$$
+
+**Key properties of logistic regression:**
+
+- The model is *linear in the log-odds*, so coefficients have a direct
+  interpretation as log-odds ratios.
+- The **odds ratio** for feature $x_j$ is $e^{\beta_j}$ — a one-unit increase in
+  $x_j$ multiplies the odds of default by $e^{\beta_j}$.
+- Regularisation (L1 / L2 / ElasticNet) is straightforward to apply.
+- It produces *calibrated* probability outputs, which are essential for credit
+  risk pricing.
+
+### Non-Linear Models
+
+Models such as Random Forests, Gradient Boosting (LightGBM / XGBoost), and
+Neural Networks can capture complex non-linear interactions automatically:
+
+$$
+\hat{P}(Y=1 \mid \mathbf{x}) = f(\mathbf{x}), \quad f \text{ is a non-parametric, possibly non-smooth function}
+$$
+
+**Key properties:**
+
+- Can model interaction effects and non-linear feature responses without
+  manual engineering.
+- Generally achieve higher predictive accuracy on tabular data.
+- However, they are *black boxes* — individual predictions cannot easily be
+  decomposed into interpretable contributions.
+
+```{r glm-vs-nonlinear, echo=FALSE, fig.width=9, fig.height=3.5}
+# Illustrative: sigmoid (logistic) vs a "wiggly" non-linear boundary
+x <- seq(-5, 5, length.out = 300)
+glm_pred   <- 1 / (1 + exp(-x))
+nonlin_pred <- 1 / (1 + exp(-(sin(x) * 2 + x * 0.5)))
+
+tibble(x, GLM = glm_pred, `Non-Linear` = nonlin_pred) %>%
+  pivot_longer(-x) %>%
+  ggplot(aes(x, value, colour = name)) +
+  geom_line(linewidth = 1.2) +
+  scale_colour_manual(values = c("#e74c3c", "#3498db")) +
+  labs(
+    title  = "Decision boundary: Logistic Regression vs a Non-Linear Model",
+    x      = "Linear predictor / feature axis",
+    y      = "P(Default = 1)",
+    colour = "Model type"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+```
+
+* * *
+
+## Interpretability vs Complexity
+
+In regulated industries such as banking, model interpretability is not optional
+— it is a **legal and ethical requirement**. The table below summarises the
+trade-off:
+
+```{r interp-table, echo=FALSE}
+
+tribble(
+  ~Property,              ~`Logistic Regression`,                 ~`Non-Linear (e.g. LightGBM)`,
+  "Interpretability",     "High -- direct coefficient meaning",   "Low -- requires post-hoc tools (SHAP)",
+  "Predictive power",     "Moderate",                             "High",
+  "Regulatory compliance","Straightforward",                      "Requires extra justification",
+  "Adverse action notice","Easy -- flag top features",            "Complex",
+  "Overfitting risk",     "Low (with regularisation)",            "Higher without tuning",
+  "Calibration",          "Generally good",                       "Requires post-processing"
+) %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    escape = TRUE,
+    caption = "Interpretability vs Complexity Trade-off",
+    linesep = ""
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position"),
+    font_size = 9
+  )
+```
+
+> **Key insight:** In credit modelling, a logistic regression model that is
+> carefully feature-engineered can often close the AUC gap with non-linear
+> models while remaining fully interpretable and regulatorily compliant.
+
+* * *
+
+## Weight of Evidence and Information Value
+
+Weight of Evidence (WoE) and Information Value (IV) are classic credit-industry
+tools for transforming features before fitting a logistic regression.
+
+### Weight of Evidence
+
+For a categorical (or binned continuous) variable with bin $i$, WoE is defined
+as:
+
+$$
+\text{WoE}_i = \ln\!\left(\frac{\text{Distribution of Events}_i}{\text{Distribution of Non-Events}_i}\right) = \ln\!\left(\frac{p_{1i}/P_1}{p_{0i}/P_0}\right)
+$$
+
+where $p_{1i}$ is the proportion of defaulters in bin $i$, $P_1$ is the overall
+default rate, and analogously for non-defaulters.
+
+**Why WoE is useful:**
+
+- It converts any variable (numeric or categorical) into a single continuous
+  measure on the same scale.
+- A logistic regression fit on WoE-encoded features produces *monotone score
+  functions* by construction — important for business interpretability.
+- WoE captures the *relationship with the target*, not just the distribution of
+  the feature.
+
+### Information Value
+
+IV aggregates WoE across all bins to produce a single variable-importance score:
+
+$$
+\text{IV} = \sum_{i=1}^{k} (p_{1i} - p_{0i}) \times \text{WoE}_i
+$$
+
+| IV Range | Predictive Power |
+|----------|-----------------|
+| < 0.02   | Useless          |
+| 0.02 – 0.1 | Weak           |
+| 0.1 – 0.3  | Medium         |
+| 0.3 – 0.5  | Strong         |
+| > 0.5    | Suspicious (possible data leakage) |
+
+```{r iv-example, eval=FALSE, fig.height=3.5, fig.width=8, cache=TRUE, include=FALSE}
+# Compute IV for a selection of features using the scorecard package
+sel_features <- c(
+  "age", "dti_ratio", "credit_utilisation_pct",
+  "num_delinquencies_2yr", "annual_income", "interest_rate",
+  "home_ownership", "loan_purpose", "ever_delinquent"
+)
+
+iv_df <- iv(
+  train_df %>% select(all_of(sel_features), default_flag),
+  y = "default_flag"
+) %>%
+  arrange(desc(info_value)) %>%
+  mutate(
+    strength = case_when(
+      info_value < 0.02  ~ "Useless",
+      info_value < 0.1   ~ "Weak",
+      info_value < 0.3   ~ "Medium",
+      info_value < 0.5   ~ "Strong",
+      TRUE               ~ "Suspicious"
+    )
+  )
+
+ggplot(iv_df, aes(x = reorder(variable, info_value), y = info_value, fill = strength)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(
+    values = c(Useless = "#bdc3c7", Weak = "#f39c12",
+               Medium = "#27ae60", Strong = "#2980b9",
+               Suspicious = "#e74c3c")
+  ) +
+  coord_flip() +
+  labs(title = "Information Value by Feature", x = NULL, y = "IV",
+       fill = "Strength") +
+  theme_minimal(base_size = 12)
+```
+
+* * *
+
+## Key Model Metrics
+
+### Accuracy
+
+$$\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+
+In credit modelling, accuracy is a **poor primary metric** due to class imbalance
+(~15\% default rate). A model that predicts "no default" for everyone achieves
+~85\% accuracy but catches zero defaulters.
+
+### AUC (Area Under the ROC Curve)
+
+The ROC curve plots the True Positive Rate (Sensitivity) vs False Positive Rate
+at every threshold. AUC = 1 is perfect; AUC = 0.5 is random.
+
+$$\text{AUC} = P(\hat{p}_{defaulter} > \hat{p}_{non-defaulter})$$
+
+### Gini Coefficient
+
+Gini is a linear transformation of AUC:
+
+$$\text{Gini} = 2 \times \text{AUC} - 1$$
+
+It ranges from 0 (random) to 1 (perfect). Credit models typically target
+Gini $\geq$ 0.5 (AUC $\geq$ 0.75). Gini is the **industry-standard** rank-ordering
+metric.
+
+### Precision, Recall, and F1
+
+$$
+\text{Precision} = \frac{TP}{TP+FP}, \quad
+\text{Recall} = \frac{TP}{TP+FN}, \quad
+F_1 = 2 \cdot \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}
+$$
+
+In lending:
+- **Precision** = "Of the loans we declined, how many would truly have defaulted?"
+  — minimising false declines (Type I error from the bank's perspective).
+- **Recall** = "Of all true defaulters, how many did we catch?" — minimising bad
+  loans approved.
+- There is an inherent **business trade-off**: higher recall means catching more
+  bad loans but also declining more good customers (lower precision).
+
+```{r metric-viz, echo=FALSE, fig.width=8, fig.height=3}
+# Illustrative ROC placeholder — actual curves computed in Task 2
+data.frame(
+  FPR = c(0, 0.05, 0.15, 0.30, 0.50, 0.70, 1),
+  Baseline = c(0, 0.20, 0.45, 0.60, 0.75, 0.87, 1),
+  Improved = c(0, 0.35, 0.62, 0.78, 0.88, 0.94, 1)
+) %>%
+  pivot_longer(-FPR, names_to = "Model", values_to = "TPR") %>%
+  ggplot(aes(FPR, TPR, colour = Model)) +
+  geom_line(linewidth = 1.1) +
+  geom_abline(linetype = "dashed", colour = "grey60") +
+  scale_colour_manual(values = c(Baseline = "#e74c3c", Improved = "#2980b9")) +
+  annotate("text", x = 0.7, y = 0.35, label = "AUC = 0.68\n(Baseline)",
+           colour = "#e74c3c", size = 3.5) +
+  annotate("text", x = 0.45, y = 0.78, label = "AUC target > 0.75\n(Improved)",
+           colour = "#2980b9", size = 3.5) +
+  labs(title = "Illustrative ROC Curves: Baseline vs Improved Model",
+       x = "False Positive Rate", y = "True Positive Rate") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+* * *
+
+## Regulatory Considerations
+
+Although this dataset is simulated, the following features would likely draw
+scrutiny from a real-world financial regulator (e.g. the CFPB in the US, the
+FCA in the UK, or the FSCA in South Africa):
+
+| Feature | Regulatory Concern |
+|---------|--------------------|
+| `age` | Age discrimination laws (e.g. US Equal Credit Opportunity Act) prohibit using age as a primary credit factor for applicants over 40. |
+| `region` | Regional proxies can correlate with race, ethnicity, or socio-economic status, constituting **indirect discrimination** (redlining). |
+| `phone_verified` | A digital-divide proxy — unverified phones may correlate with lower income or demographics; can constitute disparate impact. |
+| `email_domain_type` | Similarly, `free` vs `corporate` email may proxy income or occupation, which could be a protected class proxy. |
+
+> **Best practice:** All model features should be subject to a **Disparate Impact
+> Analysis** to ensure they do not disproportionately affect protected classes,
+> even if the discrimination is unintentional.
+
+* * *
+
+# Part 2: EDA
+
+```{r}
+data<-read.csv('loan_book.csv')
+```
+
+The dataset initially consisted of 26 variables and 120,960 observations. The variables included `applicant_id_hash`, `age`, `annual_income`, `employment_length_years`, `home_ownership`, `region`, `num_open_accounts`, `num_delinquencies_2yr`, `total_revolving_balance`, `credit_utilisation_pct`, `months_since_oldest_account`, `num_hard_inquiries_6mo`, `loan_amount`, `interest_rate`, `loan_purpose`, `dti_ratio`, `months_since_last_delinquency`, `pct_accounts_current`, `application_date`, `application_dow`, `branch_code_id`, `months_at_current_address`, `email_domain_type`, `phone_verified`, and `default_flag`. The `applicant_id_hash` variable was removed as it served only as a unique identifier and was not relevant to the analysis or predictive modelling process.
+
+The dataset also contained 602 duplicate records, which were identified and removed during the data cleaning stage. After removing these duplicates, the final dataset contained 120,358 observations.
+
+
+```{r duplicates and NAs}
+
+data<-data%>%
+  distinct()%>%
+  select(-applicant_id_hash, -branch_code_id)
+
+na_summary <- data %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "NA_count") %>%
+  mutate(NA_percent = NA_count / nrow(data) * 100)
+
+
+kbl(
+  na_summary %>%
+    filter(NA_percent > 0) %>%
+    mutate(across(where(is.numeric), ~round(.x, 2))),
+  format = "latex", booktabs = TRUE
+)
+```
+The variables `annual_income`, `employment_length_years`, `num_open_accounts`, and `months_since_last_delinquency` contained missing values. Since the first three variables are numeric, imputation techniques were applied to handle the missing observations while preserving the dataset size. The `months_since_last_delinquency` variable contained approximately 50\% missing values, making direct imputation less reliable. Instead, feature engineering techniques were used to derive more meaningful information from the variable while reducing the impact of the large proportion of missing records.
+
+
+## Variable standardising
+
+```{r}
+kbl(t(unique(data$home_ownership))) # attend
+kbl(t(unique(data$loan_purpose))) # attend
+
+# standardising
+data <- data %>%
+  mutate(across(where(is.character), ~ str_to_upper(.))) %>%
+  mutate(across(where(is.character), ~ str_replace_all(., "[^A-Z0-9 ]", " "))) %>%
+  mutate(home_ownership = case_when(
+    home_ownership %in% c("RENTING") ~ "RENT",
+    home_ownership %in% c("OWNER") ~ "OWN",
+    TRUE ~ home_ownership))
+
+#Date time column fix
+data <- data %>%
+  mutate(application_date = parse_date_time(
+    application_date,
+    orders = c("ymd", "mdy", "dmy", "d-b-Y")),
+    application_date = as.Date(application_date))
+
+# factors
+data <- data %>%
+  mutate(across(c(home_ownership, region, loan_purpose,
+                  application_dow, email_domain_type,
+                  phone_verified, default_flag, set),
+                as.factor))
+
+```
+
+The dataset contained inconsistent naming conventions for the same home ownership categories. For example, `RENT` and `RENTING` represented the same category, as did `OWN` and `OWNER`. Inconsistencies were also caused by differences in letter casing (uppercase and lowercase) and the use of special characters such as hyphens (`-`). As a result, identical real-world categories were separated into multiple labels. To standardise the data, all text values were converted to uppercase and special characters were removed by replacing them with empty spaces.
+
+The `application_date` variable contained multiple date formats, including `YYYY-MM-DD`, `MM/DD/YYYY`, `DD/MM/YYYY`, and `DD-Mon-YYYY`. These formats were standardised and converted into a single Date format of `YYYY-MM-DD`.
+
+Additionally, the variables `home_ownership`, `region`, `loan_purpose`, `application_dow`, `email_domain_type`, `phone_verified`, `default_flag`, and `set` were converted to factor variables for categorical analysis and modelling purposes.
+
+* * *
+## Univariate Data Analysis
+
+```{r fig.height=6, fig.width=4, fig.align='center'}
+cat_cols <- c(
+  "home_ownership", "region", "loan_purpose",
+  "application_dow", "email_domain_type",
+  "phone_verified", "default_flag", "set"
+)
+
+data %>%
+  select(all_of(cat_cols)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_bar() +
+  facet_wrap(~variable, nrow = 4, ncol = 2, scales = "free") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 6),panel.grid = element_blank())+
+  labs(title = "Univariate Distribution of Categorical Variables",
+       x = NULL,
+       y = "Count")
+
+
+```
+The dataset was divided into training and testing subsets, consisting of 84,247 observations for training and 36,084 observations for testing. The main reasons for loan applications were debt consolidation, home improvement, major purchases, and medical expenses. Approximately 85\% of clients had verified phone numbers, and the majority used free email domains, followed by corporate email domains. Most borrowers had mortgages on their homes, while smaller proportions were renting or fully owned their properties. Although regional differences were not very distinct, the North Urban and Suburban regions recorded the highest number of loans issued by the company.
+
+
+```{r fig.height=6, fig.width=7}
+num_cols <- c(
+  "age", "annual_income", "employment_length_years",
+  "num_open_accounts", "num_delinquencies_2yr",
+  "total_revolving_balance", "credit_utilisation_pct",
+  "months_since_oldest_account", "num_hard_inquiries_6mo",
+  "loan_amount", "interest_rate", "dti_ratio",
+  "months_since_last_delinquency", "months_at_current_address"
+)
+
+
+data %>%
+  select(all_of(num_cols)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 40) +
+  facet_wrap(~variable, nrow = 4, ncol = 4, scales = "free") +
+  theme(panel.grid = element_blank())+
+  labs(
+    title = "Univariate Distributions of Numeric Variables",
+    x = NULL,
+    y = "Frequency"
+  )
+
+```
+
+The univariate distributions indicate a mix of well-behaved, skewed, and discrete variables within the dataset. Several financial variables, including annual_income, loan_amount, and total_revolving_balance, are strongly right-skewed with long tails, suggesting the presence of significant outliers and the need for transformations to improve model stability. The dti_ratio and employment_length_years variables also show mild to moderate right skewness. In contrast interest_rate, credit_utilisation_pct, and months_since_oldest_account appear more approximately normally distributed and are less affected by extreme values.
+
+Count-based variables such as num_delinquencies_2yr and num_hard_inquiries_6mo are highly discrete and concentrated at lower values, particularly zero, indicating sparse event occurrences. Similarly, months_since_last_delinquency exhibits a strong spike at zero with a long tail, suggesting a zero-inflated structure where a large proportion of applicants have no recorded delinquency history. The months_at_current_address variable appears relatively uniform, indicating limited variation and potentially weaker predictive power on its own. The age distribution is concentrated in the working-age population (approximately 20–50 years) with some irregularities at the lower bound that may require further investigation. Overall, the dataset is characterised by non-normality, skewness, and zero inflation, implying that appropriate transformations, careful feature engineering, and specialised treatment of count variables are necessary for effective modelling.
+
+* * *
+## Bi-variate Data Analysis
+
+```{r}
+data %>%
+  select(all_of(cat_cols), default_flag) %>%
+  pivot_longer(cols = -default_flag,
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = value, fill = default_flag)) +
+  geom_bar(position = "fill") +
+  facet_wrap(~variable, scales = "free_x") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    title = "Categorical Variables vs Default Flag",
+    y = "Proportion"
+  )
+```
+The visualization illustrates the relationship between several categorical variables and the `default_flag` using proportional stacked bar charts. Overall, the dataset is highly imbalanced, with non-default cases (`0`) making up the majority across all categories, while default cases (`1`) represent a much smaller proportion. This pattern is consistent throughout the plots, indicating that defaults are relatively rare in the dataset.
+
+For `application_dow`, the proportion of defaults remains almost identical across all days of the week, suggesting that the day on which an application is submitted has little influence on whether a customer defaults. Similarly, `email_domain_type` shows minimal variation between categories such as free, corporate, and other email domains, implying that email type alone is unlikely to be a strong predictor of default risk.
+
+The `home_ownership` variable displays slightly more noticeable differences. Individuals who rent appear to have a marginally higher proportion of defaults compared to those who own homes or have mortgages. This may reflect differences in financial stability, as home ownership is often associated with stronger financial standing. The `loan_purpose` variable also shows some variation across categories. Certain loan purposes, such as medical or small business loans, appear to have slightly higher default proportions, which may indicate greater financial pressure or uncertainty associated with these types of borrowing.
+
+For `phone_verified`, the proportions between verified and unverified users are nearly identical, suggesting that phone verification status alone does not significantly distinguish between defaulters and non-defaulters. Likewise, the `region` variable shows very small differences across suburban and urban regions, indicating that geographic location may not strongly influence default behaviour in this dataset.
+
+The `set` variable, which compares the training and testing datasets, reveals nearly identical distributions of the target variable across both subsets. This is a positive sign, as it suggests that the train-test split was performed appropriately and that there is little evidence of dataset shift or sampling bias between the two sets.
+
+Overall, the analysis suggests that most categorical variables exhibit only minor differences in default proportions, meaning that individually they may have limited predictive power. However, variables such as `home_ownership` and `loan_purpose` show slightly stronger patterns and may contribute more meaningfully to predictive models. While these visualizations provide useful initial insights, they only show marginal relationships and do not indicate statistical significance or interaction effects. Additional analyses, such as chi-square tests, logistic regression, or tree-based feature importance measures, would be necessary to determine the true predictive value of each variable.
+
+```{r fig.height=6, fig.width=7}
+data %>%
+  mutate(default_flag = as.factor(default_flag)) %>%
+  select(all_of(num_cols), default_flag) %>%
+  pivot_longer(cols = -default_flag,
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = default_flag, y = value, fill = default_flag)) +
+  geom_boxplot() +
+  facet_wrap(~variable, scales = "free") +
+  scale_fill_manual(
+    values = c("0" = "red", "1" = "blue"),
+    name = "Default Flag"
+  ) +
+  theme(
+    panel.grid = element_blank()
+  ) +
+  labs(
+    title = "Numeric Variables vs Default Flag",
+    x = "Default Flag",
+    y = "Value"
+  )
+```
+The boxplots illustrate the relationship between several numerical variables and the `default_flag`, allowing for a comparison of the distributions between non-defaulters (`0`) and defaulters (`1`). Overall, the plots reveal more noticeable differences between the two groups than those observed in the categorical variable analysis, suggesting that numerical variables may provide stronger predictive power for identifying default risk.
+
+The `age` variable shows that individuals who default tend to be slightly younger than those who do not default. Non-defaulters generally have a higher median age and a wider distribution, while defaulters are more concentrated in the lower age ranges. This may indicate that younger borrowers are more financially vulnerable or have less established credit histories.
+
+For `annual_income`, both groups exhibit large variability and numerous outliers, with income distributions appearing heavily skewed. Although there is overlap between the groups, defaulters tend to have slightly lower incomes overall. However, the substantial spread suggests that income alone may not strongly separate default behaviour without considering other financial variables.
+
+The `credit_utilisation_pct` variable shows a clearer distinction between the groups. Defaulters generally exhibit higher credit utilisation percentages, indicating that they use a larger proportion of their available credit. High credit utilisation is commonly associated with financial stress and is therefore likely to be an important predictor of default risk. Similarly, the `dti_ratio` (debt-to-income ratio) is slightly higher for defaulters, suggesting that individuals with greater debt burdens relative to their income are more likely to default.
+
+The `employment_length_years` variable indicates that defaulters tend to have shorter employment histories compared to non-defaulters. Shorter employment duration may reflect reduced income stability, which can increase the likelihood of repayment difficulties. The `interest_rate` variable also demonstrates a noticeable difference, with defaulters generally receiving higher interest rates. This is expected, as lenders often assign higher rates to borrowers perceived as riskier.
+
+The `loan_amount` distributions appear relatively similar between the two groups, suggesting that loan size alone may not strongly influence default outcomes. In contrast, `months_at_current_address` shows that defaulters tend to have slightly shorter residence durations, which could indicate lower residential stability. Likewise, `months_since_last_delinquency` and `months_since_oldest_account` both suggest that non-defaulters generally have longer credit histories and more established financial records.
+
+The variables `num_delinquencies_2yr` and `num_hard_inquiries_6m` display more distinct differences between the groups. Defaulters tend to have higher numbers of recent delinquencies and hard credit inquiries, both of which are strong indicators of financial distress or aggressive credit-seeking behaviour. These variables are therefore likely to be highly informative in predictive modeling. Similarly, `num_open_accounts` appears slightly higher for defaulters, though the difference is less pronounced.
+
+Finally, the `total_revolving_balance` variable exhibits substantial skewness and many outliers for both groups. While there is considerable overlap, non-defaulters appear to maintain somewhat lower median revolving balances relative to defaulters, although the distinction is not especially strong.
+
+Overall, the numerical variables demonstrate clearer separation between defaulters and non-defaulters than the categorical variables. Variables such as `credit_utilisation_pct`, `interest_rate`, `dti_ratio`, `num_delinquencies_2yr`, and `num_hard_inquiries_6m` appear particularly informative and are likely to contribute significantly to predictive models. The presence of skewness and numerous outliers across several variables also suggests that preprocessing steps such as scaling, transformation, or outlier treatment may improve model performance.
+
+
+
+* * *
+## Multi-variate Data Analysis
+ 
+```{r , fig.align='center'}
+num_data <- data %>%
+  select(where(is.numeric))
+
+cor_matrix <- cor(num_data, use = "pairwise.complete.obs")
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         tl.cex = 0.6,
+         number.cex = 0.5)
+
+```
+ The correlation heatmap illustrates the strength and direction of linear relationships between the numerical variables in the dataset. Correlation values range from `-1` to `1`, where values closer to `1` indicate a strong positive relationship, values closer to `-1` indicate a strong negative relationship, and values near `0` suggest little or no linear association. Overall, the majority of the variables exhibit weak correlations, indicating limited multicollinearity within the dataset. This is beneficial for predictive modeling, particularly for models such as logistic regression, where highly correlated predictors can negatively affect model stability and interpretation.
+
+One of the strongest positive correlations is observed between `age` and `months_since_oldest_account` (`0.95`). This relationship is expected, as older individuals are more likely to have longer-established credit histories. Another moderate positive relationship exists between `interest_rate` and `dti_ratio` (`0.43`), suggesting that borrowers with higher debt-to-income ratios tend to receive higher interest rates, likely because lenders perceive them as higher-risk borrowers.
+
+The variable `credit_utilisation_pct` shows a moderate positive correlation with `total_revolving_balance` (`0.38`), which is intuitive because individuals carrying larger revolving balances are likely to use a greater percentage of their available credit. Similarly, `employment_length_years` has a moderate positive relationship with `age` (`0.39`) and `months_since_oldest_account` (`0.37`), reflecting that older borrowers typically have longer employment histories and more established credit records.
+
+Several moderate negative correlations are also visible. The variable `num_delinquencies_2yr` is negatively correlated with `pct_accounts_current` (`-0.41`) and `months_since_last_delinquency` (`-0.27`). These relationships suggest that borrowers with more recent delinquencies tend to have a lower percentage of current accounts and fewer months since their last delinquency event, which aligns with expectations regarding poor credit behaviour. Additionally, `interest_rate` shows a negative relationship with `pct_accounts_current` (`-0.21`) and `months_since_last_delinquency` (`-0.14`), implying that borrowers with weaker repayment histories are generally assigned higher interest rates.
+
+Most other variables demonstrate correlations close to zero, indicating relatively independent relationships. For example, `loan_amount` has weak correlations with nearly all other variables, suggesting that loan size does not strongly depend on the financial or behavioural variables included in the analysis. Likewise, `num_open_accounts` shows very limited correlation with the other predictors.
+
+From a modeling perspective, the heatmap suggests that multicollinearity is not a major concern in the dataset, except potentially for the very strong relationship between `age` and `months_since_oldest_account`. The correlation structure indicates that the variables capture different aspects of borrower behaviour and financial health, which is advantageous for building robust predictive models for default risk.
+
+* * *
+## Data cleaning 
+
+### Imputation
+
+Missing values were imputed using the median imputation technique, where each missing observation in a variable was replaced with the median value of the non-missing observations for that variable. Median imputation is preferred when the data may contain outliers or skewed distributions, as the median is less sensitive to extreme values compared to the mean. The median imputation formula is given by:
+
+\[
+x_i =
+\begin{cases}
+x_i, & \text{if } x_i \text{ is observed} \\
+\tilde{x}, & \text{if } x_i \text{ is missing}
+\end{cases}
+\]
+
+where \(x_i\) represents an observation in the dataset and \(\tilde{x}\) denotes the median of all observed values in the variable.
+```{r}
+
+cols <- c(
+  "annual_income",
+  "employment_length_years",
+  "num_open_accounts"
+)
+
+data <- data %>%
+  mutate(across(all_of(cols),
+                ~ if_else(is.na(.),
+                          median(., na.rm = TRUE),
+                          .)))
+
+
+```
+The variable `months_since_last_delinquency` was identified as Missing Not At Random (MNAR), meaning that the missingness itself carries meaningful information and is likely related to the underlying behaviour of the variable. Therefore, the variable was not removed from the dataset. Instead, it was retained for feature engineering to preserve potentially valuable predictive information. A missingness indicator variable was created to capture whether an observation was missing or not, allowing the model to learn patterns associated with the absence of values. This approach helps retain information that could otherwise be lost if the variable were simply dropped or imputed without consideration of the missingness mechanism.
+
+
+
+### Outliers 
+
+Outliers in the `Income` and `Loan Amount` variables were identified and removed using the Tukey fences method. This technique detects extreme values based on the interquartile range (IQR), which measures the spread of the middle 50\% of the data. Observations lying below the lower fence or above the upper fence were considered outliers and removed from the dataset. The lower and upper Tukey fences are calculated as:
+
+\[\text{Lower Fence} = Q_1 - 1.5 \times IQR\]
+\[\text{Upper Fence} = Q_3 + 1.5 \times IQR\]
+
+where:
+\[IQR = Q_3 - Q_1\]
+
+\(Q_1\) represents the first quartile (25th percentile), and \(Q_3\) represents the third quartile (75th percentile). Any observation \(x_i\) satisfying
+\[x_i < Q_1 - 1.5(IQR)\] or \[x_i > Q_3 + 1.5(IQR)\]
+
+was classified as an outlier and excluded from further analysis. This method was applied only to the `Income` and `Loan Amount` variables, as these variables exhibited extreme values that could disproportionately influence the modelling process. This led to a 8% decrease in records
+
+```{r fig.height=3, fig.width=5, fig.align='left'}
+data %>%
+  select(annual_income, loan_amount) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot(outlier.colour = "red") +
+  facet_wrap(~variable, scales = "free") +
+  labs(
+    title = "Income and Loan Amount with Outliers Highlighted",
+    x = NULL,
+    y = "Value")
+
+cols <- c("annual_income", "loan_amount")
+
+data <- data %>%
+  filter(annual_income >= quantile(annual_income, 0.25) -
+                     1.5 * IQR(annual_income),
+         annual_income <= quantile(annual_income, 0.75) +
+                     1.5 * IQR(annual_income),
+         loan_amount >= quantile(loan_amount, 0.25) -
+                   1.5 * IQR(loan_amount),
+         loan_amount <= quantile(loan_amount, 0.75) +
+                   1.5 * IQR(loan_amount))
+```
+
+
+```{r fig.height=3, fig.width=5, fig.align='left'}
+data %>%
+  select(annual_income, loan_amount) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot() +
+  facet_wrap(~variable, scales = "free") +
+  labs(
+    title = "Income and Loan Amount (Outliers Removed via Tukey Fences)",
+    x = NULL,
+    y = "Value"
+  )
+
+```
+
+* * *
+\newpage
+## EDA-Informed Feature Engineering
+
+```{r}
+# dealing with missing deliquencies
+data <- data %>%
+  mutate(
+    ever_delinquent = as.integer(!is.na(months_since_last_delinquency)))%>%
+  select(-months_since_last_delinquency, -age, -phone_verified, -email_domain_type, -region)
+```
+
+The feature engineering process was designed to improve the predictive power of the dataset by transforming skewed variables, creating informative financial risk indicators, and capturing interactions between borrower behaviour and credit exposure. These engineered features help the model better identify patterns associated with loan repayment behaviour and default risk.
+
+Firstly, logarithmic scaling was applied to highly skewed numerical variables including annual income, loan amount, total revolving balance, and employment length in years. Financial variables are often right-skewed because a small number of individuals have extremely large values. Applying the `log1p()` transformation reduces the impact of outliers, stabilises variance, and produces distributions that are closer to normality. This improves model performance and helps algorithms learn more balanced relationships within the data.
+
+Several derived financial features were then created to better represent borrower affordability and credit behaviour. Monthly income was generated from annual income to provide a more realistic measure of disposable earning capacity relative to debt obligations. The credit history ratio was created by comparing the age of the oldest account to the borrower’s age, allowing the model to evaluate the maturity of a borrower’s credit history relative to their lifespan.
+
+Risk-based indicator variables were also introduced. The `dti_risk` flag identifies borrowers whose debt-to-income ratio exceeds 40\%, a threshold commonly associated with higher financial stress. Similarly, the `risk_flag` variable categorises borrowers based on delinquency behaviour, while `delinquency_band` groups the number of recent delinquencies into interpretable risk levels (“None”, “Low”, “Moderate”, and “High”). These categorical representations simplify complex numeric behaviour into meaningful credit risk categories that models can easily interpret.
+
+Additional ratio-based variables were engineered to capture relationships between borrowing behaviour and repayment capacity. The `revolving_to_income` feature measures how much revolving debt a borrower carries relative to their income, which reflects financial pressure. The `income_per_emp_yr` variable estimates earning stability by relating income to employment duration, while `repayment_stability` evaluates account repayment consistency relative to delinquency frequency. The `inquiries_per_account` feature measures borrowing demand by examining how frequently a borrower seeks new credit relative to the number of open accounts.
+
+Interaction features were also included to model compounded financial risk. The `util_x_dti` variable combines credit utilisation and debt-to-income ratio to capture borrowers who simultaneously exhibit high debt usage and high repayment burden. Similarly, `interest_burden` combines interest rate and debt-to-income ratio to estimate the overall financial strain caused by borrowing costs.
+
+To improve interpretability and capture nonlinear relationships, categorical utilisation bands were created from the credit utilisation percentage. Borrowers were classified into “Low”, “Moderate”, and “High” utilisation groups, which helps distinguish varying levels of credit dependence. Finally, aggregate exposure measures such as `exposure_score`, which combines loan amount and revolving balance, were engineered to estimate the borrower’s total credit exposure.
+
+```{r log scaling}
+
+
+skewed_cols <- c("annual_income","loan_amount","total_revolving_balance","employment_length_years")
+
+data <- data %>%
+  mutate(across(all_of(skewed_cols),
+                ~ log1p(.),
+                .names = "log_{.col}"))
+
+# Derived cols
+data<-data %>% mutate(
+    # monthly income
+    monthly_income        = annual_income / 12,
+    
+    # dti flag
+    dti_risk =ifelse(dti_ratio > 0.4,1,0),
+    
+    # deliquencies ranked
+    delinquency_band = as.factor(case_when(
+      num_delinquencies_2yr == 0 ~ "None",
+      num_delinquencies_2yr <= 2 ~ "Low",
+      num_delinquencies_2yr <= 5 ~ "Moderate",
+      TRUE ~ "High")),
+    
+    # risk flag
+    risk_flag = ifelse(num_delinquencies_2yr >2, 0, 1),
+
+    #Revolving utilisation relative to income 
+    revolving_to_income   = total_revolving_balance / (annual_income + 1),
+
+    #Risk intensity score: combines delinquency + hard inquiries
+    risk_score_raw        = num_delinquencies_2yr * 3 + num_hard_inquiries_6mo,
+
+    # Utilisation × DTI interaction 
+    util_x_dti            = credit_utilisation_pct * dti_ratio,
+
+    #  Income per year of employment 
+    income_per_emp_yr     = annual_income / (employment_length_years + 1),
+    
+    #payment stability
+    repayment_stability = pct_accounts_current / (num_delinquencies_2yr + 1),
+    
+    #borrowing demand
+    inquiries_per_account = num_hard_inquiries_6mo / (num_open_accounts + 1),
+    
+    #credit utilisation
+    utilisation_band = as.factor(case_when(
+      credit_utilisation_pct < 0.3 ~ "Low",
+      credit_utilisation_pct < 0.7 ~ "Moderate",
+      TRUE ~ "High")),
+    
+    # interest burden
+    interest_burden = interest_rate * dti_ratio,
+    
+    # credit exposure
+    exposure_score = loan_amount + total_revolving_balance
+  )
+
+```
+ 
+## Data splitting
+
+The dataset was split into training and test set, because of the class imbalance 16\% for Defaulters and 84\% for non-defaulters I applied the use of weights to account for the minor class.
+```{r}
+train_df <- data %>%
+  filter(set == "TRAIN")%>%
+  select(-set)
+  
+test_df <- data %>%
+  filter(set == "TEST")%>%
+  select(-set)
+
+# weights
+n<-nrow(train_df)
+n_def<-sum(train_df$default_flag==1)
+nn_def<-sum(train_df$default_flag==0)
+
+w_def<-n/(2*n_def)
+wn_def<-n/(2*nn_def)
+
+weights<-ifelse(train_df$default_flag==1,w_def,wn_def)
+
+```
+
+
+ 
+## Information Value — Feature Selection
+
+We compute IV on the **training set** to rank all features before WoE encoding.
+This protects against data leakage.
+
+```{r iv-selection, fig.height=6}
+# Full feature set for IV screening
+model_features <- names(train_df)
+
+iv_results <- iv(
+  train_df %>% select(all_of(model_features), default_flag),
+  y = "default_flag"
+) %>%
+  arrange(desc(info_value)) %>%
+  mutate(
+    strength = case_when(
+      info_value < 0.02 ~ "Useless",
+      info_value < 0.1  ~ "Weak",
+      info_value < 0.3  ~ "Medium",
+      info_value < 0.5  ~ "Strong",
+      TRUE              ~ "Suspicious"
+    ),
+    strength = factor(strength,
+                      levels = c("Useless","Weak","Medium","Strong","Suspicious"))
+  )
+```
+
+```{r iv-selection 2, eval=FALSE, fig.height=6, include=FALSE}
+# Show table
+iv_results %>%
+  mutate(info_value = round(info_value, 4)) %>%
+  kable(format = "latex",
+        booktabs = TRUE,
+        caption = "Information Values") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"),font_size = 8,
+                full_width = FALSE) %>%
+  row_spec(which(iv_results$strength == "Strong"), bold = TRUE)
+```
+ 
+ 
+
+```{r iv-plot, fig.height=6}
+ggplot(iv_results, aes(x = reorder(variable, info_value),
+                       y = info_value, fill = strength)) +
+  geom_col(width = 0.7, alpha = 0.9) +
+  scale_fill_manual(values = c(
+    Useless    = "grey",
+    Weak       = "orange",
+    Medium     = "blue",
+    Strong     = "green",
+    Suspicious = "red"
+  )) +
+  geom_text(aes(label = round(info_value, 3)), hjust = -0.15, size = 3) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, max(iv_results$info_value) * 1.12)) +
+  labs(title = "Feature IV Ranking",
+       subtitle = "Features with IV < 0.02 dropped from model",
+       x = NULL, y = "Information Value", fill = "Predictive\nStrength") +
+  theme_minimal(base_size = 12)
+```
+
+```{r select-features}
+# Keep features with IV ≥ 0.02 (exclude useless)
+selected_features <- iv_results %>%
+  filter(info_value >= 0.02) %>%
+  pull(variable)
+```
+
+## WoE Binning & Transformation
+
+Weight of Evidence encoding converts all features onto a common log-odds scale.
+Bins are computed **only on training data** and then applied to the test set.
+
+```{r woe-binning, cache=TRUE}
+set.seed(2026)
+
+# Build WoE bins on training set
+bins <- woebin(
+  train_df %>% select(all_of(selected_features), default_flag),
+  y             = "default_flag",
+  print_info    = FALSE,
+  stop_limit    = 0.05,
+  bin_num_limit = 8
+)
+
+# Apply to both train and test sets
+train_woe <- woebin_ply(
+  train_df %>% select(all_of(selected_features), default_flag),
+  bins,
+  print_info = FALSE
+)
+
+test_woe <- woebin_ply(
+  test_df %>% select(all_of(selected_features), default_flag),
+  bins,
+  print_info = FALSE
+)
+```
+
+### Inspect key WoE bins
+
+```{r woe-plots, fig.height=4, fig.width=7}
+# Plot top-6 features by IV
+top6 <- iv_results %>%
+  slice_head(n = 6) %>%
+  pull(variable)
+
+plots <- lapply(top6, function(feat) {
+  b <- bins[[feat]]
+  if (is.null(b)) return(NULL)
+  ggplot(b, aes(x = reorder(bin, woe), y = woe, fill = woe > 0)) +
+    geom_col(show.legend = FALSE, alpha = 0.85) +
+    scale_fill_manual(values = c(`TRUE` = "#2ecc71", `FALSE` = "#e74c3c")) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+    coord_flip() +
+    labs(title = feat,
+         subtitle = paste0("IV = ", round(sum(b$bin_iv, na.rm=TRUE), 3)),
+         x = NULL, y = "WoE") +
+    theme_minimal(base_size = 9)
+})
+
+grid.arrange(grobs = Filter(Negate(is.null), plots), ncol = 2)
+```
+
+* * *
+## Improved Logistic Regression (WoE + Feature Engineering)
+
+### Model Training
+
+The improved model uses all WoE-encoded features selected by IV screening.
+
+```{r improved-model}
+woe_feature_cols <- setdiff(names(train_woe), "default_flag")
+
+# Regularised logistic regression (L2 / Ridge) to handle potential
+# multicollinearity among WoE features
+set.seed(2026)
+
+X_train <- as.matrix(train_woe %>% select(all_of(woe_feature_cols)))
+y_train <- train_woe$default_flag
+
+X_test  <- as.matrix(test_woe %>% select(all_of(woe_feature_cols)))
+y_test  <- test_woe$default_flag
+
+# Cross-validate to find optimal lambda
+cv_fit <- cv.glmnet(
+  X_train, y_train,
+  family  = "binomial",
+  alpha   = 0.5,           # ElasticNet
+  nfolds  = 10,
+  type.measure = "auc", weights = weights
+)
+
+best_lambda <- cv_fit$lambda.min
+
+# Final model
+improved_model <- glmnet(
+  X_train, y_train,
+  family = "binomial",
+  alpha  = 0,
+  lambda = best_lambda, weights = weights
+)
+
+```
+Elastic Net Regression is a regularised linear regression technique that combines both L1 (Lasso) and L2 (Ridge) penalties within a single model. The L1 penalty assists with feature selection by shrinking some coefficients exactly to zero, while the L2 penalty stabilises the model by reducing the impact of highly correlated predictors. By combining these two penalties, Elastic Net improves model generalisation, reduces overfitting, and performs well in high-dimensional datasets where predictors may be strongly related.
+
+The Elastic Net cost function is given by:
+
+$$
+\min_{\beta} \left\{
+  \sum_{i=1}^{n}(y_i - \hat{y}_i)^2
+  + \lambda_1 \sum_{j=1}^{p} |\beta_j|
+  + \lambda_2 \sum_{j=1}^{p} \beta_j^2
+\right\}
+$$
+ The logistic regression model stabilized through cross validation with 10 folds and the identified optimal lambda is 0.001443. The improved model offers an improvement compared to the baseline logistic regression model with an AUC of 80.21\% and a Gini of 60.43\%. 
+
+```{r improved-predictions}
+improved_preds <- as.numeric(predict(improved_model, newx = X_test, type = "response"))
+improved_roc <- roc(y_test, improved_preds, quiet = TRUE)
+
+```
+## Optimal Threshold
+
+```{r threshold-metrics}
+# Find optimal threshold (maximise Youden's J = Sensitivity + Specificity - 1)
+best_idx   <- which.max(improved_roc$sensitivities + improved_roc$specificities - 1)
+best_thresh <- improved_roc$thresholds[best_idx]
+
+preds_class <- as.integer(improved_preds >= best_thresh)
+cm <- confusionMatrix(factor(preds_class), factor(y_test), positive = "1")
+
+cm_tbl <- tibble(
+  Metric    = c("Accuracy", "Sensitivity (Recall)", "Specificity",
+                "Precision (PPV)", "F1 Score", "Balanced Accuracy"),
+  Value     = c(
+    cm$overall["Accuracy"],
+    cm$byClass["Sensitivity"],
+    cm$byClass["Specificity"],
+    cm$byClass["Pos Pred Value"],
+    cm$byClass["F1"],
+    cm$byClass["Balanced Accuracy"]
+  )
+) %>%
+  mutate(Value = round(Value, 4))
+```
+
+Because selecting a classification threshold can be arbitrary, the optimal threshold was determined by maximising Youden’s (J) statistic, which identifies the point that jointly maximises sensitivity and specificity. This is illustrated by the peak of the green curve. Further information on Youden’s (J) statistic can be found at https://www.emergentmind.com/topics/youden-s-j-statistic. The optimal threshold identified was 0.487639 which is very close to the arbitrary value of 0.5.
+
+```{r fig.height=4, fig.width=6}
+thresholds <- improved_roc$thresholds
+sens <- improved_roc$sensitivities
+spec <- improved_roc$specificities
+youden <- sens + spec - 1
+
+plot(thresholds, sens,
+     type = "l",
+     col = "blue",
+     lwd = 2,
+     ylim = c(0, 1),
+     xlab = "Threshold",
+     ylab = "Performance",
+     main = "Threshold vs Model Performance")
+
+lines(thresholds, spec, col = "red", lwd = 2)
+lines(thresholds, youden, col = "darkgreen", lwd = 2)
+
+legend("right",
+       legend = c("Sensitivity", "Specificity", "Youden's J"),
+       col = c("blue", "red", "darkgreen"),
+       lwd = 2)
+abline(v=best_thresh, lty=2)
+```
+
+```{r metrics}
+cm_tbl %>%
+  kable(format = "latex", booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"), font_size=8)
+```
+
+The improved logistic regression model achieved an accuracy of 0.719, meaning that 72% of the observations were correctly classified. While accuracy provides an overall measure of predictive performance, it should be interpreted alongside other evaluation metrics such as precision, recall (sensitivity), specificity, and the F1-score, particularly in the presence of class imbalance.
+
+The model obtained a sensitivity (recall) of 0.74,3, indicating that it correctly identified 73.55% of the non-defaulting clients (positive class = 0). This suggests that the model performs reasonably well in detecting clients who are unlikely to default. Similarly, the specificity of 0.715 indicates that 71.5% of the defaulting clients were correctly classified, demonstrating relatively balanced discrimination between defaulters and non-defaulters.
+
+However, the precision of 0.334 is relatively low, implying that a substantial proportion of the observations predicted as non-defaulters were actually defaulters which is a big concern.
+
+The F1-score of 0.461 reflects the balance between precision and recall. Since the F1-score combines both measures into a single metric, the moderate value indicates that the strong recall is offset by the lower precision, thereby reducing the overall predictive balance of the model.
+
+The balanced accuracy of 0.729 indicates that the model performs consistently across both classes by equally accounting for sensitivity and specificity. This is particularly important given the observed class imbalance, as balanced accuracy provides a more reliable assessment of model performance than standard accuracy alone.
+
+Overall, the logistic regression model demonstrates moderate predictive performance with relatively balanced sensitivity and specificity. The model is effective at identifying non-defaulting clients; however, the low precision suggests that further model refinement may be necessary to reduce false positive classifications and improve prediction reliability.
+
+
+# Conclusion
+
+This project successfully developed an interpretable credit risk prediction model capable of identifying borrowers who are likely to default on loans. Through comprehensive exploratory data analysis, data preprocessing, feature engineering, and statistical modelling, the study demonstrated how carefully engineered logistic regression models can achieve strong predictive performance while maintaining transparency and explainability.
+
+The exploratory analysis revealed that numerical financial variables such as credit utilisation percentage, debt-to-income ratio, interest rate, recent delinquencies, and hard credit inquiries were among the strongest indicators of default risk. In contrast, most categorical variables exhibited relatively weak individual relationships with the target variable. The dataset also presented several practical challenges commonly encountered in real-world financial data, including missing values, skewed distributions, outliers, inconsistent categorical labels, and class imbalance. These issues were addressed using appropriate preprocessing techniques such as median imputation, Tukey fence outlier removal, logarithmic transformations, and missingness indicators.
+
+Feature engineering played a significant role in improving model performance. Derived variables such as repayment stability, revolving-to-income ratio, utilisation bands, and interaction features provided additional insight into borrower financial behaviour and risk exposure. Information Value analysis and Weight of Evidence encoding further enhanced the interpretability and predictive strength of the logistic regression model while reducing the risk of data leakage.
+
+The final Elastic Net regularised logistic regression model achieved an AUC of approximately 80.34% and a Gini coefficient of 60.68%, indicating strong discriminatory performance for an interpretable model. The model also achieved balanced sensitivity and specificity, demonstrating its ability to distinguish between defaulters and non-defaulters reasonably well. However, the relatively low precision indicated that false positive classifications remained a concern, suggesting that additional model refinement or alternative threshold optimisation strategies may further improve prediction reliability.
+
+---
